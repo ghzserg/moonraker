@@ -10,6 +10,7 @@ import shutil
 import zipfile
 import logging
 import stat
+import subprocess
 from .app_deploy import AppDeploy
 from .common import Channel, AppType
 from ...utils import source_info
@@ -160,8 +161,8 @@ class NetDeploy(AppDeploy):
     async def _detect_fallback(self) -> bool:
         # Only used by "web" app types to fallback on the previous version info
         fallback_defs = {
-            "mainsail": "mainsail-crew",
-            "fluidd": "fluidd-core"
+            "mainsail": "ghzserg",
+            "fluidd": "ghzserg"
         }
         for fname in ("manifest.json", "manifest.webmanifest"):
             manifest = self.path.joinpath(fname)
@@ -459,6 +460,7 @@ class NetDeploy(AppDeploy):
         self._log_app_info()
         self._save_state()
         await self.restart_service()
+        subprocess.run(["/opt/config/mod/.shell/root/S70httpd", "restart"])
         msg = "Update Finished..." if rollback_info is None else "Rollback Complete"
         self.notify_status(msg, is_complete=True)
         return True

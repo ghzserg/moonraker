@@ -11,6 +11,7 @@ import pathlib
 import shutil
 import re
 import logging
+import subprocess
 from .app_deploy import AppDeploy
 from .common import Channel
 from ...utils.versions import GitVersion
@@ -102,6 +103,50 @@ class GitDeploy(AppDeploy):
         # Refresh local repo state
         await self._update_repo_state(need_fetch=False)
         await self.restart_service()
+
+        if "/mod_data/plugins/" in str(self.path):
+            include_line = f"[include plugins/{self.name}/{self.name}.cfg]"
+            cfg_path = "/opt/config/mod_data/plugins.cfg"
+            plugin_enabled = False
+
+            if os.path.isfile(cfg_path):
+                try:
+                    with open(cfg_path, encoding='utf-8') as f:
+                        for line in f:
+                            if line.strip() == include_line:
+                                plugin_enabled = True
+                                break
+                except OSError as e:
+                    self.log_warning(f"Cannot read {cfg_path}: {e}")
+
+            update_script_path = self.path.joinpath("update.sh")
+            if plugin_enabled and update_script_path.is_file():
+                self.log_info(f"Update script found at {update_script_path}, executing...")
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        str(update_script_path),
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        cwd=str(self.path)
+                    )
+                    stdout, stderr = await proc.communicate()
+
+                    if proc.returncode != 0:
+                        self.log_info(f"Update script failed with return code {proc.returncode}")
+                        if stderr:
+                            self.log_info(f"Stderr: {stderr.decode()}")
+                        if stdout:
+                            self.log_info(f"Stdout: {stdout.decode()}")
+                    else:
+                        self.log_info("Update script executed successfully")
+                        if stdout:
+                            self.log_info(f"Script output: {stdout.decode()}")
+
+                except Exception as e:
+                    self.log_info(f"Error executing update script: {e}")
+
+        if self.name=="zmod":
+            subprocess.run(["/bin/sudo", "systemctl", "reboot"])
         self.notify_status("Update Finished...", is_complete=True)
         return True
 
@@ -128,12 +173,12 @@ class GitDeploy(AppDeploy):
             await self.repo.reset(reset_ref)
             await self._update_repo_state()
         self.repo.set_rollback_state(None)
-
         if self.repo.is_dirty() or not self._is_valid:
             raise self.server.error(
                 "Recovery attempt failed, repo state not pristine", 500)
         await self._update_dependencies(dep_info, force=force_dep_update)
         await self.restart_service()
+        subprocess.run(["/bin/sudo", "systemctl", "reboot"])
         self.notify_status("Reinstall Complete", is_complete=True)
 
     async def rollback(self) -> bool:
@@ -143,6 +188,7 @@ class GitDeploy(AppDeploy):
             await self._update_dependencies(dep_info)
             await self._update_repo_state(need_fetch=False)
             await self.restart_service()
+            subprocess.run(["/bin/sudo", "systemctl", "reboot"])
             msg = "Rollback Complete"
         else:
             msg = "Rollback not performed"

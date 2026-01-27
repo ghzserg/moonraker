@@ -6,6 +6,9 @@
 
 from __future__ import annotations
 import logging
+# FF5M Fix Print Bug
+import re
+# END FF5M Fix Print Bug
 from ..utils import Sentinel
 from ..common import WebRequest, APITransport, RequestType
 
@@ -51,6 +54,13 @@ class KlippyAPI(APITransport):
         # we do not want to overwrite them
         self.host_subscription: Subscription = {}
         self.subscription_callbacks: List[SubCallback] = []
+
+        # FF5M Fix Print Bug
+        self.server.register_endpoint(
+             "/printer/objects/list", RequestType.GET,
+            self._get_object_list
+        )
+        # END FF5M Fix Print Bug
 
         # Register GCode Aliases
         self.server.register_endpoint(
@@ -140,7 +150,20 @@ class KlippyAPI(APITransport):
             filename = filename[1:]
         # Escape existing double quotes in the file name
         filename = filename.replace("\"", "\\\"")
-        script = f'SDCARD_PRINT_FILE FILENAME="{filename}"'
+
+        # FF5M Fix Print Bug
+        found = False
+        with open('/opt/config/printer.cfg') as file:
+          for line in file:
+            if re.search('display_off.cfg', line):
+              found = True
+              break
+        # Если работаем в режиме без экрана
+        if found:
+            script = f'_ZSDCARD_PRINT_FILE FILENAME="{filename}"'
+        else:
+            script = f'_PRINT_FILE FILENAME="{filename}"'
+        # END FF5M Fix Print Bug
         if wait_klippy_started:
             await self.klippy.wait_started()
         logging.info(f"Requesting Job Start, filename = {filename}")
@@ -220,6 +243,54 @@ class KlippyAPI(APITransport):
         if default is not Sentinel.MISSING:
             return default
         raise self.server.error("Invalid response received from Klippy", 500)
+
+    # FF5M Fix Print Bug
+    async def _get_object_list(
+        self, web_request: WebRequest
+    ):
+        result = await self.get_object_list(default=None)
+        found = False
+        with open('/etc/os-release') as file:
+          for line in file:
+            if re.search('VERSION_CODENAME="Adventurer5MPro ', line):
+              found = True
+              break
+        if 'output_pin level_h1' in result:
+            result.remove('output_pin level_h1')
+        if 'output_pin level_h2' in result:
+            result.remove('output_pin level_h2')
+        if 'output_pin level_h3' in result:
+            result.remove('output_pin level_h3')
+        if 'output_pin power_off' in result:
+            result.remove('output_pin power_off')
+        if 'output_pin clear_power_off' in result:
+            result.remove('output_pin clear_power_off')
+        if 'output_pin level_clear' in result:
+            result.remove('output_pin level_clear')
+        if 'filament_switch_sensor check_level_pin_alt' in result:
+            result.remove('filament_switch_sensor check_level_pin_alt')
+        if 'filament_switch_sensor e1_sensor' in result:
+            result.remove('filament_switch_sensor e1_sensor')
+        if 'temperature_sensor cutValue' in result:
+            result.remove('temperature_sensor cutValue')
+        if 'temperature_sensor filamentValue' in result:
+            result.remove('temperature_sensor filamentValue')
+        if not found:
+            if 'fan_generic external_fan' in result:
+                result.remove('fan_generic external_fan')
+            if 'fan_generic internal_fan' in result:
+                result.remove('fan_generic internal_fan')
+            if 'fan_generic external' in result:
+                result.remove('fan_generic external')
+            if 'fan_generic internal' in result:
+                result.remove('fan_generic internal')
+            if 'temperature_sensor tvocValue' in result:
+                result.remove('temperature_sensor tvocValue')
+        return {
+            "objects": result
+        }
+    # END FF5M Fix Print Bug
+
 
     async def query_objects(self,
                             objects: Mapping[str, Optional[List[str]]],
