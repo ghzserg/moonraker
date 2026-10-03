@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog].
 
 ## [Unreleased]
 
+### Changed
+- **authorization**: Revert API Key checking to previous behavior.  When
+  API key authentication is disabled fall back to trusted user authentication.
+
 ## [0.11.0] - 2026-08-25
 
 ### Changed
