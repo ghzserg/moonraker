@@ -231,10 +231,12 @@ class BaseSlicer(metaclass=SlicerType):
     def identify(cls, data: str) -> Tuple[str, str] | None:
         return None
 
-    def run_parsers(self) -> Dict[str, Any]:
+    def run_parsers(self, exclude: Tuple[str, ...] = ()) -> Dict[str, Any]:
         result: Dict[str, Any] = {}
         for name in vars(BaseSlicer).keys():
             if name.startswith("parse_"):
+                if name[6:] in exclude:
+                    continue
                 func = getattr(self, name)
                 if not callable(func):
                     continue
@@ -1210,11 +1212,29 @@ class KiriMoto(BaseSlicer):
             r"; firstLayerBedTemp = (%F)", self.header_data
         )
 
+GCODE_ROOT: Optional[str] = None
+
+def _analyze_gcode_file(path: str) -> Dict[str, Any]:
+    slicer = BaseSlicer.from_file(path)
+    return slicer.run_parsers(
+        exclude=("thumbnails", "gcode_start_byte", "gcode_end_byte")
+    )
+
 class ThreeMFProject(BaseSlicer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         from parse_3mf import ThreeMFParser
-        self.parser = ThreeMFParser(self.path)
+        self.parser = ThreeMFParser(
+            self.path, tmp_root=GCODE_ROOT, gcode_analyzer=_analyze_gcode_file
+        )
+
+    def run_parsers(self, exclude: Tuple[str, ...] = ()) -> Dict[str, Any]:
+        result = super().run_parsers(exclude)
+        for key, val in self.parser.get_gcode_metadata().items():
+            if key in exclude or key in result:
+                continue
+            result[key] = val
+        return result
 
     @classmethod
     def identify(cls, data: str) -> Tuple[str, str] | None:
@@ -1401,7 +1421,9 @@ def extract_ufp(ufp_path: str, dest_path: str) -> None:
         logger.info(f"Error removing ufp file: {ufp_path}")
 
 def main(config: Dict[str, Any]) -> None:
+    global GCODE_ROOT
     gc_path: str = config["gcode_dir"]
+    GCODE_ROOT = gc_path
     filename: str = config["filename"]
     file_path = os.path.join(gc_path, filename)
     processors: List[Dict[str, Any]] = config.get("processors", [])

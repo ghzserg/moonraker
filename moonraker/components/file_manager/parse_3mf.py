@@ -1,16 +1,34 @@
 # (C) 2026 ghzserg https://github.com/ghzserg/zmod
 
 import os
+import re
 import json
+import time
+import shutil
+import uuid
+import logging
 import zipfile
 import xml.etree.ElementTree as ET
 from PIL import Image
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Callable
+
+COPY_CHUNK = 256 * 1024
+TMP_DIR_NAME = "tmp"
+STALE_TMP_SECONDS = 600
+GCODE_ONLY_KEYS = ("thumbnails", "gcode_start_byte", "gcode_end_byte")
 
 class ThreeMFParser:
-    def __init__(self, file_path: str):
+    def __init__(
+        self,
+        file_path: str,
+        tmp_root: Optional[str] = None,
+        gcode_analyzer: Optional[Callable[[str], Dict[str, Any]]] = None,
+    ):
         self.path = file_path
+        self.tmp_root = tmp_root or os.path.dirname(file_path)
+        self.gcode_analyzer = gcode_analyzer
         self._cached_plate_xml = None
+        self._cached_gcode_meta: Optional[Dict[str, Any]] = None
 
     def get_plate_xml(self) -> Optional[ET.Element]:
         if self._cached_plate_xml is not None:
@@ -114,3 +132,61 @@ class ThreeMFParser:
             if colors:
                 return colors
         return None
+
+    @staticmethod
+    def _find_first_plate_gcode(zf: zipfile.ZipFile) -> Optional[str]:
+        names = zf.namelist()
+        plates = []
+        for n in names:
+            m = re.fullmatch(r"Metadata/plate_(\d+)\.gcode", n, re.IGNORECASE)
+            if m:
+                plates.append((int(m.group(1)), n))
+        if plates:
+            return min(plates)[1]
+        others = sorted(n for n in names if n.lower().endswith(".gcode"))
+        return others[0] if others else None
+
+    def _cleanup_stale_tmp(self, tmp_dir: str) -> None:
+        now = time.time()
+        try:
+            for name in os.listdir(tmp_dir):
+                fp = os.path.join(tmp_dir, name)
+                try:
+                    if os.path.isfile(fp) and now - os.path.getmtime(fp) > STALE_TMP_SECONDS:
+                        os.remove(fp)
+                except OSError:
+                    pass
+        except OSError:
+            pass
+
+    def get_gcode_metadata(self) -> Dict[str, Any]:
+        if self._cached_gcode_meta is not None:
+            return self._cached_gcode_meta
+        self._cached_gcode_meta = {}
+        if self.gcode_analyzer is None:
+            return self._cached_gcode_meta
+        tmp_dir = os.path.join(self.tmp_root, TMP_DIR_NAME)
+        tmp_path: Optional[str] = None
+        try:
+            with zipfile.ZipFile(self.path, "r") as zf:
+                inner = self._find_first_plate_gcode(zf)
+                if inner is None:
+                    return self._cached_gcode_meta
+                os.makedirs(tmp_dir, exist_ok=True)
+                self._cleanup_stale_tmp(tmp_dir)
+                tmp_path = os.path.join(tmp_dir, f"{uuid.uuid4().hex}.3mfgc")
+                with zf.open(inner) as src, open(tmp_path, "wb") as dst:
+                    shutil.copyfileobj(src, dst, COPY_CHUNK)
+            meta = self.gcode_analyzer(tmp_path)
+            self._cached_gcode_meta = {
+                k: v for k, v in meta.items() if k not in GCODE_ONLY_KEYS
+            }
+        except Exception:
+            logging.exception("3mf: unable to read gcode of first plate")
+        finally:
+            if tmp_path is not None:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+        return self._cached_gcode_meta
