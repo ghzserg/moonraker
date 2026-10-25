@@ -206,10 +206,11 @@ class BaseSlicer(metaclass=SlicerType):
         return False
 
     @classmethod
-    def from_file(cls, file_path: str) -> BaseSlicer:
+    def from_file(cls, file_path: str, plate_index: Optional[int] = None) -> BaseSlicer:
         if file_path.lower().endswith('.3mf'):
             return ThreeMFProject(
-                file_path, os.path.getsize(file_path), "PK\x03\x04", "3MF Project", "1.0"
+                file_path, os.path.getsize(file_path), "PK\x03\x04", "3MF Project", "1.0",
+                plate_index=plate_index
             )
         header = tail = ""
         with open(file_path, 'rb') as f:
@@ -1221,11 +1222,12 @@ def _analyze_gcode_file(path: str) -> Dict[str, Any]:
     )
 
 class ThreeMFProject(BaseSlicer):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, plate_index: Optional[int] = None, **kwargs):
         super().__init__(*args, **kwargs)
         from parse_3mf import ThreeMFParser
         self.parser = ThreeMFParser(
-            self.path, tmp_root=GCODE_ROOT, gcode_analyzer=_analyze_gcode_file
+            self.path, tmp_root=GCODE_ROOT, gcode_analyzer=_analyze_gcode_file,
+            plate_index=plate_index
         )
 
     def run_parsers(self, exclude: Tuple[str, ...] = ()) -> Dict[str, Any]:
@@ -1370,15 +1372,16 @@ def run_gcode_processors(
     return finished_procs, reload_slicer_data
 
 def extract_metadata(
-    file_path: str, processors: List[Dict[str, Any]]
+    file_path: str, processors: List[Dict[str, Any]],
+    plate_index: Optional[int] = None
 ) -> Dict[str, Any]:
     metadata: Dict[str, Any] = {}
     proc_list: List[str] = []
-    slicer = BaseSlicer.from_file(file_path)
+    slicer = BaseSlicer.from_file(file_path, plate_index=plate_index)
     if processors:
         proc_list, reload = run_gcode_processors(file_path, slicer, processors)
         if reload:
-            slicer = BaseSlicer.from_file(file_path)
+            slicer = BaseSlicer.from_file(file_path, plate_index=plate_index)
     metadata["size"] = os.path.getsize(file_path)
     metadata["modified"] = os.path.getmtime(file_path)
     metadata["uuid"] = str(uuid.uuid4())
@@ -1386,6 +1389,8 @@ def extract_metadata(
     metadata["slicer"] = slicer.slicer_name
     metadata["slicer_version"] = slicer.slicer_version
     metadata.update(slicer.run_parsers())
+    if plate_index is not None:
+        metadata['plate_index'] = plate_index
     return metadata
 
 def extract_ufp(ufp_path: str, dest_path: str) -> None:
@@ -1445,8 +1450,17 @@ def main(config: Dict[str, Any]) -> None:
     if not os.path.isfile(file_path):
         logger.info(f"File Not Found: {file_path}")
         sys.exit(-1)
+    plate_index = config.get("plate_index")
+    if plate_index is not None:
+        try:
+            plate_index = int(plate_index)
+            if plate_index < 1:
+                plate_index = None
+        except (ValueError, TypeError):
+            plate_index = None
     try:
-        metadata = extract_metadata(file_path, processors)
+        metadata = extract_metadata(
+            file_path, processors, plate_index=plate_index)
     except Exception:
         logger.info(traceback.format_exc())
         sys.exit(-1)

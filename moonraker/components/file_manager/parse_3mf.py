@@ -17,16 +17,23 @@ TMP_DIR_NAME = "tmp"
 STALE_TMP_SECONDS = 600
 GCODE_ONLY_KEYS = ("thumbnails", "gcode_start_byte", "gcode_end_byte")
 
+
 class ThreeMFParser:
     def __init__(
         self,
         file_path: str,
         tmp_root: Optional[str] = None,
         gcode_analyzer: Optional[Callable[[str], Dict[str, Any]]] = None,
+        plate_index: Optional[int] = None,
     ):
         self.path = file_path
         self.tmp_root = tmp_root or os.path.dirname(file_path)
         self.gcode_analyzer = gcode_analyzer
+        try:
+            pi = int(plate_index) if plate_index is not None else 1
+        except (ValueError, TypeError):
+            pi = 1
+        self.plate_index = pi if pi > 0 else 1
         self._cached_plate_xml = None
         self._cached_gcode_meta: Optional[Dict[str, Any]] = None
 
@@ -36,15 +43,33 @@ class ThreeMFParser:
         try:
             with zipfile.ZipFile(self.path, 'r') as zf:
                 file_list = zf.namelist()
-                plate_cfgs = [f for f in file_list if f.startswith('Metadata/plate_') and f.endswith('.config')]
-                if not plate_cfgs and 'Metadata/slice_info.config' in file_list:
-                    plate_cfgs = ['Metadata/slice_info.config']
-                if plate_cfgs:
-                    xml_data = zf.read(plate_cfgs[0])
+                target_cfg = "Metadata/plate_" + str(self.plate_index) + ".config"
+                if target_cfg in file_list:
+                    xml_data = zf.read(target_cfg)
+                elif 'Metadata/slice_info.config' in file_list:
+                    xml_data = zf.read('Metadata/slice_info.config')
+                else:
+                    plate_cfgs = [
+                        f for f in file_list
+                        if f.startswith('Metadata/plate_')
+                        and f.endswith('.config')
+                    ]
+                    xml_data = zf.read(plate_cfgs[0]) if plate_cfgs else b""
+                if xml_data:
                     self._cached_plate_xml = ET.fromstring(xml_data)
         except Exception:
             pass
         return self._cached_plate_xml
+
+    def _plate_image_regexes(self):
+        n = self.plate_index
+        full = re.compile(
+            rf"^Metadata/plate_{n}\.(?:png|jpg|jpeg)$", re.IGNORECASE
+        )
+        small = re.compile(
+            rf"^Metadata/plate_{n}_\w+\.(?:png|jpg|jpeg)$", re.IGNORECASE
+        )
+        return full, small
 
     def parse_thumbnails(self) -> Optional[List[Dict[str, Any]]]:
         parsed_matches: List[Dict[str, Any]] = []
@@ -58,10 +83,21 @@ class ThreeMFParser:
         try:
             with zipfile.ZipFile(self.path, 'r') as zf:
                 file_list = zf.namelist()
-                images = [f for f in file_list if f.startswith("Metadata/") and f.lower().endswith((".png", ".jpg", ".jpeg"))]
+                full_re, small_re = self._plate_image_regexes()
+                images = [
+                    f for f in file_list
+                    if f.startswith("Metadata/")
+                    and (full_re.match(f) or small_re.match(f))
+                ]
+                if not images:
+                    images = [
+                        f for f in file_list
+                        if f.startswith("Metadata/")
+                        and f.lower().endswith((".png", ".jpg", ".jpeg"))
+                    ]
                 for img_internal_path in images:
                     internal_name = os.path.basename(img_internal_path)
-                    thumb_name = f"{thumb_base}-{internal_name}"
+                    thumb_name = thumb_base + "-" + internal_name
                     thumb_path = os.path.join(thumb_dir, thumb_name)
                     rel_thumb_path = os.path.join(".thumbs", thumb_name)
                     img_data = zf.read(img_internal_path)
@@ -75,7 +111,7 @@ class ThreeMFParser:
                     parsed_matches.append({
                         'width': w, 'height': h,
                         'size': os.path.getsize(thumb_path),
-                        'relative_path': rel_thumb_path
+                        'relative_path': rel_thumb_path,
                     })
         except Exception:
             pass
@@ -120,7 +156,10 @@ class ThreeMFParser:
     def parse_filament_type(self) -> Optional[str]:
         root = self.get_plate_xml()
         if root is not None:
-            types = [fil.attrib.get("type", "Unknown").strip() for fil in root.findall(".//filament")]
+            types = [
+                fil.attrib.get("type", "Unknown").strip()
+                for fil in root.findall(".//filament")
+            ]
             if types:
                 return json.dumps(types) if len(types) > 1 else types[0]
         return None
@@ -128,14 +167,21 @@ class ThreeMFParser:
     def parse_filament_colors(self) -> Optional[List[str]]:
         root = self.get_plate_xml()
         if root is not None:
-            colors = [fil.attrib.get("color", "").strip() for fil in root.findall(".//filament") if fil.attrib.get("color")]
+            colors = [
+                fil.attrib.get("color", "").strip()
+                for fil in root.findall(".//filament")
+                if fil.attrib.get("color")
+            ]
             if colors:
                 return colors
         return None
 
-    @staticmethod
-    def _find_first_plate_gcode(zf: zipfile.ZipFile) -> Optional[str]:
+    def _find_plate_gcode(self, zf: zipfile.ZipFile) -> Optional[str]:
         names = zf.namelist()
+        target = "Metadata/plate_" + str(self.plate_index) + ".gcode"
+        for n in names:
+            if n.lower() == target.lower():
+                return n
         plates = []
         for n in names:
             m = re.fullmatch(r"Metadata/plate_(\d+)\.gcode", n, re.IGNORECASE)
@@ -152,7 +198,10 @@ class ThreeMFParser:
             for name in os.listdir(tmp_dir):
                 fp = os.path.join(tmp_dir, name)
                 try:
-                    if os.path.isfile(fp) and now - os.path.getmtime(fp) > STALE_TMP_SECONDS:
+                    if (
+                        os.path.isfile(fp)
+                        and now - os.path.getmtime(fp) > STALE_TMP_SECONDS
+                    ):
                         os.remove(fp)
                 except OSError:
                     pass
@@ -169,12 +218,14 @@ class ThreeMFParser:
         tmp_path: Optional[str] = None
         try:
             with zipfile.ZipFile(self.path, "r") as zf:
-                inner = self._find_first_plate_gcode(zf)
+                inner = self._find_plate_gcode(zf)
                 if inner is None:
                     return self._cached_gcode_meta
                 os.makedirs(tmp_dir, exist_ok=True)
                 self._cleanup_stale_tmp(tmp_dir)
-                tmp_path = os.path.join(tmp_dir, f"{uuid.uuid4().hex}.3mfgc")
+                tmp_path = os.path.join(
+                    tmp_dir, uuid.uuid4().hex + ".3mfgc"
+                )
                 with zf.open(inner) as src, open(tmp_path, "wb") as dst:
                     shutil.copyfileobj(src, dst, COPY_CHUNK)
             meta = self.gcode_analyzer(tmp_path)
@@ -182,7 +233,9 @@ class ThreeMFParser:
                 k: v for k, v in meta.items() if k not in GCODE_ONLY_KEYS
             }
         except Exception:
-            logging.exception("3mf: unable to read gcode of first plate")
+            logging.exception(
+                "3mf: unable to read gcode of plate " + str(self.plate_index)
+            )
         finally:
             if tmp_path is not None:
                 try:

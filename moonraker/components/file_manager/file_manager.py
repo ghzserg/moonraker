@@ -882,6 +882,15 @@ class FileManager:
             logging.info(
                 f"Destination file exists and appears to be read-only: {dest_path}"
             )
+        plateindex_raw = upload_args.get("plateindex")
+        plateindex: Optional[int] = None
+        if plateindex_raw is not None:
+            try:
+                pi = int(plateindex_raw)
+                if pi >= 1:
+                    plateindex = pi
+            except (ValueError, TypeError):
+                pass
         return {
             'root': root,
             'filename': filename,
@@ -893,7 +902,7 @@ class FileManager:
             'ext': f_ext,
             "is_link": os.path.islink(dest_path),
             "user": upload_args.get("current_user"),
-            "plateindex": upload_args.get("plateindex", None)
+            "plateindex": plateindex,
         }
 
     async def _finish_gcode_upload(
@@ -910,7 +919,8 @@ class FileManager:
                     "File is loaded, upload not permitted", 403)
         finfo = await self._process_uploaded_file(upload_info)
         await self.gcode_metadata.parse_metadata(
-            upload_info['filename'], finfo).wait()
+            upload_info['filename'], finfo,
+            plate_index=upload_info.get('plateindex')).wait()
         started: bool = False
         queued: bool = False
         if upload_info['start_print']:
@@ -2336,7 +2346,7 @@ class MetadataStorage:
         # be refactored to do so asynchronously.
         self.metadata: Dict[str, Any] = self.mddb.as_dict()
         self.pending_requests: Dict[
-            str, Tuple[Dict[str, Any], asyncio.Event]] = {}
+            str, Tuple[Dict[str, Any], asyncio.Event, Optional[int]]] = {}
         self.busy: bool = False
         self.processors: Dict[str, Dict[str, Any]] = {}
 
@@ -2538,7 +2548,8 @@ class MetadataStorage:
 
     def parse_metadata(self,
                        fname: str,
-                       path_info: Dict[str, Any]
+                       path_info: Dict[str, Any],
+                       plate_index: Optional[int] = None
                        ) -> asyncio.Event:
         if fname in self.pending_requests:
             return self.pending_requests[fname][1]
@@ -2546,12 +2557,13 @@ class MetadataStorage:
         ext = os.path.splitext(fname)[1]
         if (
             ext not in VALID_GCODE_EXTS or
-            self._has_valid_data(fname, path_info)
+            (plate_index is None and
+             self._has_valid_data(fname, path_info))
         ):
             # request already pending or not necessary
             mevt.set()
             return mevt
-        self.pending_requests[fname] = (path_info, mevt)
+        self.pending_requests[fname] = (path_info, mevt, plate_index)
         if self.busy:
             return mevt
         self.busy = True
@@ -2561,16 +2573,19 @@ class MetadataStorage:
 
     async def _process_metadata_update(self) -> None:
         while self.pending_requests:
-            fname, (path_info, mevt) = \
+            fname, (path_info, mevt, plate_index) = \
                 list(self.pending_requests.items())[0]
-            if self._has_valid_data(fname, path_info):
+            if (plate_index is None and
+                    self._has_valid_data(fname, path_info)):
                 mevt.set()
+                self.pending_requests.pop(fname, None)
                 continue
             ufp_path: Optional[str] = path_info.get('ufp_path', None)
             retries = 3
             while retries:
                 try:
-                    await self._run_extract_metadata(fname, ufp_path)
+                    await self._run_extract_metadata(
+                        fname, ufp_path, plate_index)
                 except Exception:
                     logging.exception("Error running extract_metadata.py")
                     retries -= 1
@@ -2596,7 +2611,8 @@ class MetadataStorage:
 
     async def _run_extract_metadata(self,
                                     filename: str,
-                                    ufp_path: Optional[str]
+                                    ufp_path: Optional[str],
+                                    plate_index: Optional[int] = None
                                     ) -> None:
         # Escape single quotes in the file name so that it may be
         # properly loaded
@@ -2605,7 +2621,8 @@ class MetadataStorage:
             "gcode_dir": self.gc_path,
             "check_objects": self.enable_object_proc,
             "ufp_path": ufp_path,
-            "processors": list(self.processors.values())
+            "processors": list(self.processors.values()),
+            "plate_index": plate_index,
         }
         timeout = self.default_metadata_parser_timeout
         if ufp_path is not None or self.enable_object_proc:
