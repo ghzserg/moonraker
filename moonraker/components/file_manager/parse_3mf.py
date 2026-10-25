@@ -33,32 +33,83 @@ class ThreeMFParser:
             pi = int(plate_index) if plate_index is not None else 1
         except (ValueError, TypeError):
             pi = 1
-        self.plate_index = pi if pi > 0 else 1
-        self._cached_plate_xml = None
+        pi = pi if pi > 0 else 1
+        self.requested_plate = pi
+        # Нарезанные платы = те, у которых есть непустой Metadata/plate_N.gcode
+        self.sliced_plates: List[int] = self._list_sliced_plates()
+        if self.sliced_plates and pi not in self.sliced_plates:
+            logging.info(
+                "3mf: plate %d is not sliced in %s, using plate %d",
+                pi, os.path.basename(file_path), self.sliced_plates[0]
+            )
+            pi = self.sliced_plates[0]
+        elif not self.sliced_plates:
+            logging.warning(
+                "3mf: no sliced plates found in %s", os.path.basename(file_path)
+            )
+        self.plate_index = pi
+        self._plate_xml_loaded = False
+        self._cached_plate_xml: Optional[ET.Element] = None
         self._cached_gcode_meta: Optional[Dict[str, Any]] = None
 
+    def _list_sliced_plates(self) -> List[int]:
+        found = set()
+        try:
+            with zipfile.ZipFile(self.path, 'r') as zf:
+                for info in zf.infolist():
+                    m = re.fullmatch(
+                        r"Metadata/plate_(\d+)\.gcode", info.filename,
+                        re.IGNORECASE
+                    )
+                    if m and info.file_size > 0:
+                        found.add(int(m.group(1)))
+        except Exception:
+            logging.exception("3mf: unable to list plates")
+        return sorted(found)
+
+    @staticmethod
+    def _plate_element_index(plate: ET.Element) -> Optional[int]:
+        for meta in plate.findall("metadata"):
+            if meta.attrib.get("key") in ("index", "plater_id"):
+                try:
+                    return int(meta.attrib.get("value", ""))
+                except ValueError:
+                    return None
+        return None
+
+    def _select_plate_element(self, root: ET.Element) -> Optional[ET.Element]:
+        plates = root.findall("plate")
+        if not plates:
+            return root
+        for p in plates:
+            if self._plate_element_index(p) == self.plate_index:
+                return p
+        if len(plates) == 1 and self._plate_element_index(plates[0]) is None:
+            return plates[0]
+        return None
+
     def get_plate_xml(self) -> Optional[ET.Element]:
-        if self._cached_plate_xml is not None:
+        if self._plate_xml_loaded:
             return self._cached_plate_xml
+        self._plate_xml_loaded = True
         try:
             with zipfile.ZipFile(self.path, 'r') as zf:
                 file_list = zf.namelist()
                 target_cfg = "Metadata/plate_" + str(self.plate_index) + ".config"
+                xml_data = b""
+                select = False
                 if target_cfg in file_list:
                     xml_data = zf.read(target_cfg)
                 elif 'Metadata/slice_info.config' in file_list:
                     xml_data = zf.read('Metadata/slice_info.config')
-                else:
-                    plate_cfgs = [
-                        f for f in file_list
-                        if f.startswith('Metadata/plate_')
-                        and f.endswith('.config')
-                    ]
-                    xml_data = zf.read(plate_cfgs[0]) if plate_cfgs else b""
+                    select = True
                 if xml_data:
-                    self._cached_plate_xml = ET.fromstring(xml_data)
+                    root = ET.fromstring(xml_data)
+                    self._cached_plate_xml = (
+                        self._select_plate_element(root) if select else root
+                    )
         except Exception:
-            pass
+            logging.exception("3mf: unable to read plate config")
         return self._cached_plate_xml
 
     def _plate_image_regexes(self):
@@ -70,6 +121,10 @@ class ThreeMFParser:
             rf"^Metadata/plate_{n}_\w+\.(?:png|jpg|jpeg)$", re.IGNORECASE
         )
         return full, small
+
+    def _image_belongs_to_plate(self, name: str) -> bool:
+        nums = re.findall(r"_(\d+)(?=[_.])", os.path.basename(name))
+        return not nums or str(self.plate_index) in nums
 
     def parse_thumbnails(self) -> Optional[List[Dict[str, Any]]]:
         parsed_matches: List[Dict[str, Any]] = []
@@ -90,10 +145,12 @@ class ThreeMFParser:
                     and (full_re.match(f) or small_re.match(f))
                 ]
                 if not images:
+                    # Любые картинки, но не принадлежащие другим платам
                     images = [
                         f for f in file_list
                         if f.startswith("Metadata/")
                         and f.lower().endswith((".png", ".jpg", ".jpeg"))
+                        and self._image_belongs_to_plate(f)
                     ]
                 for img_internal_path in images:
                     internal_name = os.path.basename(img_internal_path)
@@ -182,6 +239,8 @@ class ThreeMFParser:
         for n in names:
             if n.lower() == target.lower():
                 return n
+        if self.sliced_plates:
+            return None
         plates = []
         for n in names:
             m = re.fullmatch(r"Metadata/plate_(\d+)\.gcode", n, re.IGNORECASE)

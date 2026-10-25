@@ -1389,7 +1389,10 @@ def extract_metadata(
     metadata["slicer"] = slicer.slicer_name
     metadata["slicer_version"] = slicer.slicer_version
     metadata.update(slicer.run_parsers())
-    if plate_index is not None:
+    if isinstance(slicer, ThreeMFProject):
+        metadata['plate_index'] = slicer.parser.plate_index
+        metadata['sliced_plates'] = slicer.parser.sliced_plates
+    elif plate_index is not None:
         metadata['plate_index'] = plate_index
     return metadata
 

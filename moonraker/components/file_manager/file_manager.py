@@ -442,12 +442,18 @@ class FileManager:
                 raise self.server.error(f"File '{requested_file}' does not exist", 404)
             if gcpath.suffix not in VALID_GCODE_EXTS:
                 raise self.server.error(f"File {gcpath} is not a valid gcode file")
+            plate_index: Optional[int] = None
+            if gcpath.suffix.lower() == ".3mf":
+                old_md = self.gcode_metadata.get(requested_file, {}) or {}
+                plate_index = old_md.get('plate_index')
             # remove metadata and force a rescan
             ret = self.gcode_metadata.remove_file_metadata(requested_file)
             if ret is not None:
                 await ret
             path_info = self.get_path_info(gcpath, "gcodes")
-            evt = self.gcode_metadata.parse_metadata(requested_file, path_info)
+            evt = self.gcode_metadata.parse_metadata(
+                requested_file, path_info, plate_index=plate_index
+            )
             await evt.wait()
             metadata: Optional[Dict[str, Any]]
             metadata = self.gcode_metadata.get(requested_file, None)
@@ -926,6 +932,10 @@ class FileManager:
         if upload_info['start_print']:
             user: Optional[UserInfo] = upload_info.get("user")
             plateindex = upload_info.get('plateindex', None)
+            if upload_info['filename'].lower().endswith('.3mf'):
+                md = self.gcode_metadata.get(upload_info['filename'], {}) or {}
+                if md.get('plate_index') is not None:
+                    plateindex = md['plate_index']
             if can_start:
                 kapis: APIComp = self.server.lookup_component('klippy_apis')
                 try:

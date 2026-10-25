@@ -150,6 +150,20 @@ class KlippyAPI(APITransport):
         # XXX - validate that file is on disk
         if filename[0] == '/':
             filename = filename[1:]
+        if filename.lower().endswith('.3mf'):
+            fm = self.server.lookup_component("file_manager")
+            md = fm.get_file_metadata(filename)
+            sliced = md.get('sliced_plates') or []
+            md_plate = md.get('plate_index')
+            try:
+                req = int(plateindex) if plateindex is not None else None
+            except (ValueError, TypeError):
+                req = None
+            if md_plate is not None and (
+                req is None or (sliced and req not in sliced)
+            ):
+                req = md_plate
+            plateindex = str(req) if req is not None else None
         # Escape existing double quotes in the file name
         filename = filename.replace("\"", "\\\"")
 
@@ -167,7 +181,10 @@ class KlippyAPI(APITransport):
             script = f'_PRINT_FILE FILENAME="{filename}"'
 
         if plateindex is not None and str(plateindex).strip():
-            script += f' PLATE={plateindex}'
+            try:
+                script += f' PLATE={int(plateindex)}'
+            except (ValueError, TypeError):
+                pass
         # END FF5M Fix Print Bug
         if wait_klippy_started:
             await self.klippy.wait_started()
