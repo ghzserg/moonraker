@@ -101,7 +101,8 @@ class KlippyAPI(APITransport):
     async def _gcode_start_print(self, web_request: WebRequest) -> str:
         filename: str = web_request.get_str('filename')
         user = web_request.get_current_user()
-        return await self.start_print(filename, user=user)
+        plateindex: Optional[str] = web_request.get_str('plateindex', None)
+        return await self.start_print(filename, user=user, plateindex=plateindex)
 
     async def _gcode_restart(self, web_request: WebRequest) -> str:
         return await self.do_restart("RESTART")
@@ -138,7 +139,8 @@ class KlippyAPI(APITransport):
         self,
         filename: str,
         wait_klippy_started: bool = False,
-        user: Optional[UserInfo] = None
+        user: Optional[UserInfo] = None,
+        plateindex: Optional[str] = None
     ) -> str:
         # WARNING: Do not call this method from within the following
         # event handlers when "wait_klippy_started" is set to True:
@@ -163,6 +165,9 @@ class KlippyAPI(APITransport):
             script = f'_ZSDCARD_PRINT_FILE FILENAME="{filename}"'
         else:
             script = f'_PRINT_FILE FILENAME="{filename}"'
+
+        if plateindex is not None and str(plateindex).strip():
+            script += f' PLATE={plateindex}'
         # END FF5M Fix Print Bug
         if wait_klippy_started:
             await self.klippy.wait_started()

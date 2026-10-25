@@ -892,7 +892,8 @@ class FileManager:
             'unzip_ufp': unzip_ufp,
             'ext': f_ext,
             "is_link": os.path.islink(dest_path),
-            "user": upload_args.get("current_user")
+            "user": upload_args.get("current_user"),
+            "plateindex": upload_args.get("plateindex", None)
         }
 
     async def _finish_gcode_upload(
@@ -914,10 +915,11 @@ class FileManager:
         queued: bool = False
         if upload_info['start_print']:
             user: Optional[UserInfo] = upload_info.get("user")
+            plateindex = upload_info.get('plateindex', None)
             if can_start:
                 kapis: APIComp = self.server.lookup_component('klippy_apis')
                 try:
-                    await kapis.start_print(upload_info['filename'], user=user)
+                    await kapis.start_print(upload_info['filename'], user=user, plateindex=plateindex)
                 except self.server.error:
                     # Attempt to start print failed
                     pass
