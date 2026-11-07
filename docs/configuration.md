@@ -3163,6 +3163,8 @@ url: service://credentials/direction/?parameter=value
 #   The url for the notifier. See the Apprise documentation for notification
 #   service options and url formatting. This option accepts Jinja2 templates with
 #   support for [secrets]. This parameter must be provided.
+#   Telegram urls (tgram://) with chat ids and a "text" body_format are sent
+#   by Moonraker without loading Apprise, which is only loaded when needed.
 events: *
 #   The events that will trigger a notification. '*' means all events.
 #   This option may include multiple comma separated events.
