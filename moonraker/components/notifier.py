@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import apprise
 import logging
 import pathlib
 import re
@@ -26,6 +25,8 @@ if TYPE_CHECKING:
     from .file_manager.file_manager import FileManager
     from .klippy_apis import KlippyAPI as APIComp
 
+BODY_FORMATS = ("text", "html", "markdown")
+
 class Notifier:
     def __init__(self, config: ConfigHelper) -> None:
         self.server = config.get_server()
@@ -33,7 +34,7 @@ class Notifier:
         self.events: Dict[str, List[NotifierInstance]] = {}
         prefix_sections = config.get_prefix_sections("notifier")
         self.register_remote_actions()
-        logging.info(f"Loading notifiers, Apprise version {apprise.__version__}")
+        logging.info("Loading notifiers")
         for section in prefix_sections:
             cfg = config[section]
             try:
@@ -121,7 +122,6 @@ class NotifierInstance:
             raise config.error(f"Invalid Section Name: {config.get_name()}")
         self.server = config.get_server()
         self.name = name_parts[1]
-        self.apprise = apprise.Apprise()
         self.attach = config.gettemplate("attach", None)
         url_template = config.gettemplate("url")
         self.url = url_template.render()
@@ -131,12 +131,11 @@ class NotifierInstance:
 
         self.title = config.gettemplate("title", None)
         self.body = config.gettemplate("body", None)
-        upper_body_format = config.get("body_format", 'text').upper()
-        if not hasattr(apprise.NotifyFormat, upper_body_format):
+        self.body_format: str = config.get("body_format", 'text').lower()
+        if self.body_format not in BODY_FORMATS:
             raise config.error(f"Invalid body_format for {config.get_name()}")
-        self.body_format = getattr(apprise.NotifyFormat, upper_body_format)
         self.events: List[str] = config.getlist("events", separator=",")
-        self.apprise.add(self.url)
+        self.sender = AppriseSender(self.url, self.body_format)
 
     def as_dict(self):
         return {
@@ -203,14 +202,29 @@ class NotifierInstance:
                         )
                     else:
                         attachments.append(str(attach_path))
-        await self.apprise.async_notify(
-            rendered_body.strip(), rendered_title.strip(),
-            body_format=self.body_format,
-            attach=None if not attachments else attachments
+        await self.sender.send(
+            rendered_body.strip(), rendered_title.strip(), attachments
         )
 
     def get_name(self) -> str:
         return self.name
+
+
+class AppriseSender:
+    def __init__(self, url: str, body_format: str) -> None:
+        # Apprise is imported only when a notifier needs it, as it adds
+        # several megabytes to Moonraker's memory footprint.
+        import apprise
+        logging.info(f"Using Apprise version {apprise.__version__}")
+        self.body_format = body_format
+        self.apprise = apprise.Apprise()
+        self.apprise.add(url)
+
+    async def send(self, body: str, title: str, attachments: List[str]) -> None:
+        await self.apprise.async_notify(
+            body, title, body_format=self.body_format,
+            attach=None if not attachments else attachments
+        )
 
 
 def load_component(config: ConfigHelper) -> Notifier:
